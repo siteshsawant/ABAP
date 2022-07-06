@@ -1,0 +1,564 @@
+*&---------------------------------------------------------------------*
+*& Report ZR_PM_ORDUENOTIFY
+*&---------------------------------------------------------------------*
+*&
+*&---------------------------------------------------------------------*
+REPORT zr_pm_orduenotify.
+DATA : fm_name TYPE rs38l_fnam.
+DATA: ls_ctrl_param  TYPE ssfctrlop,
+      ls_ctrl_output TYPE ssfcompop.
+DATA: gv_devtype    TYPE rspoptype.
+DATA: gv_job_output TYPE ssfcrescl.
+DATA: subject TYPE string.
+
+TYPES: BEGIN OF ts_afih,
+         aufnr TYPE afih-aufnr,
+         ingpr TYPE afih-ingpr,
+         chk   TYPE int1,
+       END OF ts_afih,
+       BEGIN OF ts_aufk,
+         aufnr TYPE aufk-aufnr,
+         idat3 TYPE aufk-idat3,
+         zplan TYPE aufk-zplan,
+       END OF ts_aufk,
+
+       BEGIN OF ts_due,
+         aufnr TYPE afih-aufnr,
+         ingpr TYPE afih-ingpr,
+         idat3 TYPE aufk-idat3,
+         zplan TYPE aufk-zplan,
+       END OF ts_due.
+
+
+
+DATA: lt_afih         TYPE TABLE OF ts_afih WITH HEADER LINE,
+      lt_aufk         TYPE TABLE OF ts_aufk WITH HEADER LINE,
+      lt_duenext      TYPE TABLE OF ts_due WITH HEADER LINE,
+      lt_duealready   TYPE TABLE OF ts_due WITH HEADER LINE,
+      lt_nextfinal    TYPE TABLE OF zspm_ordue WITH HEADER LINE,
+      lt_alreadyfinal TYPE TABLE OF zspm_ordue WITH HEADER LINE.
+
+DATA: next  TYPE dats,
+      after TYPE dats,
+      prev  TYPE dats,
+      start TYPE dats,
+      flg   TYPE int1.
+
+DATA : it_contents TYPE STANDARD TABLE OF solisti1,
+       wa_contents TYPE solisti1,
+       w_document  TYPE REF TO cl_document_bcs.
+
+DATA: li_objhead   TYPE soli_tab,
+      gi_main_text TYPE STANDARD TABLE OF solisti1,        "type bcsy_text.
+      wa_main_text TYPE solisti1.
+
+DATA : text        TYPE char100,
+       text3       TYPE char100,
+       text1       TYPE string,
+       text2       TYPE string,
+       lv_amt1     TYPE char15,
+       lv_amt2     TYPE char15,
+       lv_amt3     TYPE char15,
+       lv_amt4     TYPE char15,
+       lv_dmbtr    TYPE dmbtr,
+       lv_date(10),
+       lv_cnt(5).
+
+
+DATA: lw_control_parameters TYPE ssfctrlop,
+      lw_output_options     TYPE ssfcompop,
+      lw_ssfcrescl          TYPE ssfcrescl,
+      lw_content            TYPE soli,
+      lw_otf                TYPE itcoo.
+
+*/..Variables Decalrations
+
+DATA: gv_fname        TYPE rs38l_fnam,       "Fucntion Module
+      gv_subject      TYPE so_obj_des,
+      gv_title        TYPE so_obj_des,
+      lv_bin_filesize TYPE i,
+      lv_transfer_bin TYPE sx_boolean,
+      lv_len          TYPE so_obj_len,
+      lv_email        TYPE ad_smtpadr,
+      lv_sent_to_all  TYPE os_boolean,
+      lv_att_name     TYPE char50,
+      lv_sub          TYPE string.         "so_obj_des.
+
+*/.. Class Declarations
+
+DATA: go_send_request  TYPE REF TO  cl_bcs,
+      go_document      TYPE REF TO  cl_document_bcs,
+      lo_recipient     TYPE REF TO  if_recipient_bcs,
+      lo_bcs_exception TYPE REF TO  cx_bcs.
+
+DATA: send_request       TYPE REF TO cl_bcs.
+*DATA: TEXT               TYPE BCSY_TEXT.
+DATA: document           TYPE REF TO cl_document_bcs.
+DATA: sender             TYPE REF TO cl_sapuser_bcs.
+DATA: sender1            TYPE REF TO cl_cam_address_bcs.
+DATA: recipient          TYPE REF TO if_recipient_bcs.
+DATA: bcs_exception      TYPE REF TO cx_bcs.
+DATA: sent_to_all        TYPE os_boolean.
+DATA: tl_contents        TYPE STANDARD TABLE OF soli.
+
+CONSTANTS:
+*-- Constants used in the body of the Email (HTML)
+  c_htm      TYPE char3   VALUE 'HTM',
+  c_space(6) TYPE c       VALUE '&nbsp;',
+  c_new_line TYPE char255 VALUE '<br>'.
+
+DATA : gv_fname1       TYPE rs38l_fnam.
+
+*/.. Internal Table Declaration
+
+DATA: li_otf         TYPE TABLE OF itcoo,
+      li_otf1        TYPE TABLE OF itcoo,
+      li_pdf_tab     TYPE TABLE OF tline,
+      li_content_txt TYPE soli_tab,
+      li_content_hex TYPE solix_tab.
+
+DATA: BEGIN OF wa,
+        data(255),
+      END OF wa.
+DATA:  itab LIKE STANDARD TABLE OF wa WITH HEADER LINE.
+
+REFRESH : li_content_hex,
+          li_objhead.
+
+CLEAR   : lv_transfer_bin, lv_transfer_bin,
+          lv_len, it_contents[].
+
+INITIALIZATION.
+
+
+START-OF-SELECTION.
+  PERFORM get_data.
+  LOOP AT lt_nextfinal.
+    PERFORM send_email.
+  ENDLOOP.
+  LOOP AT lt_alreadyfinal.
+    PERFORM send_email.
+  ENDLOOP.
+
+END-OF-SELECTION.
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM get_data.
+
+  flg = 0.
+
+  SELECT aufnr ingpr FROM afih INTO TABLE lt_afih WHERE iwerk = 1000 AND ingpr IN ( 'STM', 'STC', 'KIM', 'KIC', 'EMC', 'UTY', 'EMM' ).
+
+*SORT LT_AFIH BY ingpr ASCENDING.
+  next = sy-datum + 1.
+  after = sy-datum + 2.
+  prev = sy-datum - 1.
+  start = '20220101'.
+
+  LOOP AT lt_afih.
+    SELECT SINGLE aufnr idat3 zplan FROM aufk INTO lt_aufk WHERE aufnr = lt_afih-aufnr AND idat3 = 00000000 AND zplan IN ( sy-datum, next, after ).
+    IF sy-subrc = 0.
+      lt_duenext-aufnr = lt_afih-aufnr.
+      lt_duenext-ingpr = lt_afih-ingpr.
+      lt_duenext-idat3 = lt_aufk-idat3.
+      lt_duenext-zplan = lt_aufk-zplan.
+      APPEND lt_duenext TO lt_duenext.
+      lt_afih-chk = 1.
+      MODIFY lt_afih FROM lt_afih INDEX sy-tabix.
+    ENDIF.
+    SELECT SINGLE aufnr idat3 zplan FROM aufk INTO lt_aufk WHERE aufnr = lt_afih-aufnr AND idat3 = 00000000 AND zplan BETWEEN start AND prev .
+    IF sy-subrc = 0.
+      lt_duealready-aufnr = lt_afih-aufnr.
+      lt_duealready-ingpr = lt_afih-ingpr.
+      lt_duealready-idat3 = lt_aufk-idat3.
+      lt_duealready-zplan = lt_aufk-zplan.
+      APPEND lt_duealready TO lt_duealready.
+      lt_afih-chk = 2.
+      MODIFY lt_afih FROM lt_afih INDEX sy-tabix.
+    ENDIF.
+    CLEAR: flg, lt_afih-chk.
+  ENDLOOP.
+
+  DELETE lt_afih WHERE aufnr = lt_afih-aufnr AND chk = 0.
+***********************************************************************************
+*************************BODY PART*************************************************
+***********************************************************************************
+
+  DATA: lt_aufk2 TYPE TABLE OF aufk WITH HEADER LINE,
+        BEGIN OF lt_afiheq,
+          equnr TYPE afih-equnr,
+        END OF lt_afiheq,
+        BEGIN OF lt_eqkt,
+          eqktu TYPE eqkt-eqktu,
+        END OF  lt_eqkt,
+        count1    TYPE int4,
+        count2    TYPE int4,
+        lt_ihpa   TYPE TABLE OF ihpa WITH HEADER LINE,
+        lt_pa0002 TYPE TABLE OF pa0002 WITH HEADER LINE,
+        pr        TYPE char40,
+        v_parnr   TYPE ihpa-parnr.
+  TYPES: BEGIN OF g_ty_s_op .
+           INCLUDE TYPE /cum/cu_order_s_op_n .
+         TYPES: END OF g_ty_s_op .
+  DATA : ls_op    TYPE g_ty_s_op,
+         sys_stat TYPE string.
+  count1 = 1.
+  count2 = 1.
+
+
+  LOOP AT lt_afih.
+    SELECT SINGLE * FROM aufk INTO CORRESPONDING FIELDS OF lt_aufk2 WHERE aufnr = lt_afih-aufnr.
+    SELECT SINGLE equnr FROM afih INTO lt_afiheq WHERE aufnr = lt_afih-aufnr.
+    SELECT SINGLE eqktu FROM eqkt INTO lt_eqkt WHERE equnr = lt_afiheq-equnr.
+    SELECT SINGLE parnr FROM ihpa INTO v_parnr WHERE objnr = lt_aufk2-objnr.
+*    V_PARNR = LT_IHPA-PARNR.
+    SELECT SINGLE vorna nachn FROM pa0002 INTO CORRESPONDING FIELDS OF lt_pa0002 WHERE pernr = v_parnr.
+
+    CALL FUNCTION 'STATUS_TEXT_EDIT'
+      EXPORTING
+        flg_user_stat    = 'X'
+        objnr            = lt_aufk2-objnr
+        only_active      = 'X'
+        spras            = sy-langu
+      IMPORTING
+        line             = ls_op-sttxt
+      EXCEPTIONS
+        object_not_found = 1
+        OTHERS           = 2.
+    sys_stat =  ls_op-sttxt.
+
+    CONCATENATE lt_pa0002-vorna space lt_pa0002-nachn INTO pr RESPECTING BLANKS.
+    IF lt_afih-chk EQ 1.
+      lt_nextfinal-srno = count1.
+      lt_nextfinal-auart = lt_aufk2-auart.
+      lt_nextfinal-aufnr = lt_afih-aufnr.
+      lt_nextfinal-equnr = lt_afiheq-equnr.
+      lt_nextfinal-eqktu = lt_eqkt-eqktu.
+      lt_nextfinal-ktext = lt_aufk2-ktext.
+      lt_nextfinal-zplan = lt_aufk2-zplan.
+      lt_nextfinal-zcdate = lt_aufk2-zcdate.
+      lt_nextfinal-stat = sys_stat.
+      lt_nextfinal-pr = pr.
+      READ TABLE lt_duenext INTO lt_duenext WITH KEY aufnr = lt_afih-aufnr.
+      lt_nextfinal-ingpr = lt_duenext-ingpr.
+      APPEND lt_nextfinal TO lt_nextfinal.
+      count1 = count1 + 1.
+    ENDIF.
+    IF lt_afih-chk EQ 2.
+      lt_alreadyfinal-srno = count2.
+      lt_alreadyfinal-auart = lt_aufk2-auart.
+      lt_alreadyfinal-aufnr = lt_afih-aufnr.
+      lt_alreadyfinal-equnr = lt_afiheq-equnr.
+      lt_alreadyfinal-eqktu = lt_eqkt-eqktu.
+      lt_alreadyfinal-ktext = lt_aufk2-ktext.
+      lt_alreadyfinal-zplan = lt_aufk2-zplan.
+      lt_nextfinal-zcdate = lt_aufk2-zcdate.
+      lt_alreadyfinal-stat = sys_stat.
+      lt_alreadyfinal-pr = pr.
+      READ TABLE lt_duealready INTO lt_duealready WITH KEY aufnr = lt_afih-aufnr.
+      lt_alreadyfinal-ingpr = lt_duealready-ingpr.
+      APPEND lt_alreadyfinal TO lt_alreadyfinal.
+      count2 = count2 + 1.
+    ENDIF.
+    CLEAR: lt_afiheq, v_parnr, lt_eqkt.
+  ENDLOOP.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  SEND_EMAIL
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM send_email.
+  CLEAR : it_contents[].
+
+  "email body
+  wa_contents-line = '<HTML> <BODY>'.
+  APPEND wa_contents TO it_contents.
+  CLEAR : wa_contents.
+
+  CONCATENATE '<p style="font-family:Calibri;font-size:15;">' 'Dear users,' INTO wa_contents-line.
+  APPEND wa_contents TO it_contents.
+  CLEAR : wa_contents.
+
+  PERFORM line_break.
+  PERFORM line_break.
+
+
+  wa_contents-line = 'Kindly complete the following work orders.'.
+  APPEND wa_contents TO it_contents.
+  CLEAR : wa_contents.
+
+
+  "html body
+  wa_contents-line = '<table style="font-family:calibri;font-size:15;MARGIN:10px;"'.   " bordercolor="blue"'.
+  APPEND wa_contents TO it_contents.
+  CLEAR : wa_contents.
+
+  wa_contents-line = 'cellspacing="0" cellpadding="1" width="75%" '.
+  APPEND wa_contents TO it_contents.
+  CLEAR : wa_contents.
+
+  wa_contents-line = 'border="1"><tbody><tr>'.
+  APPEND wa_contents TO it_contents.
+  CLEAR : wa_contents.
+
+  wa_contents-line = '<th bgcolor="#C0C0C0">Sr.No.</th>'.                    "66CCFF
+  APPEND wa_contents TO it_contents.
+  CLEAR : wa_contents.
+
+  wa_contents-line = '<th bgcolor="#C0C0C0">Order Type</th>'.
+  APPEND wa_contents TO it_contents.
+  CLEAR : wa_contents.
+
+
+  wa_contents-line = '<th bgcolor="#C0C0C0">Work Order No</th>'.
+  APPEND wa_contents TO it_contents.
+  CLEAR : wa_contents.
+
+  wa_contents-line = '<th bgcolor="#C0C0C0">Equipment Nnumber</th>'.
+  APPEND wa_contents TO it_contents.
+  CLEAR : wa_contents.
+
+  wa_contents-line = '<th bgcolor="#C0C0C0">Equipment Description</th>'.
+  APPEND wa_contents TO it_contents.
+  CLEAR : wa_contents.
+
+  wa_contents-line = '<th bgcolor="#C0C0C0">Order Description</th>'.
+  APPEND wa_contents TO it_contents.
+  CLEAR : wa_contents.
+
+  wa_contents-line = '<th bgcolor="#C0C0C0">Call Date</th>'.
+  APPEND wa_contents TO it_contents.
+  CLEAR : wa_contents.
+
+  wa_contents-line = '<th bgcolor="#C0C0C0">Plan Date</th>'.
+  APPEND wa_contents TO it_contents.
+  CLEAR : wa_contents.
+
+  wa_contents-line = '<th bgcolor="#C0C0C0">Order Status</th>'.
+  APPEND wa_contents TO it_contents.
+  CLEAR : wa_contents.
+
+  wa_contents-line = '<th bgcolor="#C0C0C0">Person Responsible</th>'.
+  APPEND wa_contents TO it_contents.
+  CLEAR : wa_contents.
+
+  "table content
+*  CLEAR : lv_cnt.
+*  LOOP AT gt_booking INTO gs_booking.
+*    CLEAR : gs_coappl.
+*
+*    wa_contents-line = '<tr align = "center">'.
+*    APPEND wa_contents TO it_contents.
+*    CLEAR : wa_contents.
+*
+*    lv_cnt = lv_cnt + 1.
+*    CONCATENATE '<td>' lv_cnt '</td>' INTO wa_contents-line SEPARATED BY space.
+*    APPEND wa_contents TO it_contents.
+*    CLEAR : wa_contents.
+*
+*    CLEAR : lv_date.
+*    WRITE gs_booking-bkdate TO lv_date.
+*
+*    CONCATENATE '<td>' lv_date '</td>' INTO wa_contents-line SEPARATED BY space.
+*    APPEND wa_contents TO it_contents.
+*    CLEAR : wa_contents.
+*
+*    CONCATENATE '<td>' gs_master-proj_name '</td>' INTO wa_contents-line SEPARATED BY space.
+*    APPEND wa_contents TO it_contents.
+*    CLEAR : wa_contents.
+*
+*    CONCATENATE '<td>' gs_booking-name1 '</td>' INTO wa_contents-line SEPARATED BY space.
+*    APPEND wa_contents TO it_contents.
+*    CLEAR : wa_contents.
+*
+*    CONCATENATE '<td>' gs_booking-unit_no '</td>' INTO wa_contents-line SEPARATED BY space.
+*    APPEND wa_contents TO it_contents.
+*    CLEAR : wa_contents.
+*
+*    WRITE : gs_booking-agvalue TO wa_contents-line.
+*    CONDENSE wa_contents-line.
+*
+*    CONCATENATE '<td>' wa_contents-line '</td>' INTO wa_contents-line SEPARATED BY space.
+*    APPEND wa_contents TO it_contents.
+*    CLEAR : wa_contents.
+*
+*    CLEAR : gs_coappl.
+*    LOOP AT gt_coappl INTO gs_coappl WHERE bknum = gs_booking-bknum
+*                                       AND mobile IS NOT INITIAL.
+*      EXIT.
+*    ENDLOOP.
+*
+*    CONCATENATE '<td>' gs_coappl-mobile '</td>' INTO wa_contents-line SEPARATED BY space.
+*    APPEND wa_contents TO it_contents.
+*    CLEAR : wa_contents.
+*
+*    CLEAR : gs_coappl.
+*    LOOP AT gt_coappl INTO gs_coappl WHERE bknum = gs_booking-bknum
+*                                       AND email IS NOT INITIAL.
+*      EXIT.
+*    ENDLOOP.
+*
+*    CONCATENATE '<td>' gs_coappl-email '</td>' INTO wa_contents-line SEPARATED BY space.
+*    APPEND wa_contents TO it_contents.
+*    CLEAR : wa_contents.
+*
+*    CLEAR : gs_booking.
+*  ENDLOOP.
+
+*----------------------------end on 17.07.2017--------------------------------------*
+  wa_contents-line = '</tbody> </table>'.
+  APPEND wa_contents TO it_contents.
+  CLEAR : wa_contents.
+
+  PERFORM line_break.
+  PERFORM line_break.
+
+  wa_contents-line = 'Kindly note:'.
+  APPEND wa_contents TO it_contents.
+  CLEAR : wa_contents.
+
+  PERFORM line_break.
+
+  CONCATENATE c_space c_space c_space c_space 'This is auto generated mail from SAP-PM' INTO wa_contents-line SEPARATED BY space.
+  APPEND wa_contents TO it_contents.
+  CLEAR : wa_contents.
+
+  PERFORM line_break.
+
+
+  TRY.
+*     -------- create persistent send request ------------------------
+      go_send_request = cl_bcs=>create_persistent( ).
+
+*     -------- create and set document -------------------------------
+*     create document from internal table with text
+
+      go_document = cl_document_bcs=>create_document(
+                      i_type    = 'HTM'
+                      i_text    = it_contents
+*                      i_length  = '12'
+                      i_subject = '' ).             "'
+
+
+      CALL METHOD go_send_request->set_message_subject
+        EXPORTING
+          ip_subject = 'Test Mail P11'.
+
+*      IF C_NOTICE IS NOT INITIAL.
+*        LV_ATT_NAME = 'Notice of Termination'.
+*      ENDIF.
+
+*      IF NOT LI_CONTENT_HEX IS INITIAL.
+*        GO_DOCUMENT->ADD_ATTACHMENT(
+*             I_ATTACHMENT_TYPE      = 'PDF'
+*             I_ATTACHMENT_SUBJECT   = LV_ATT_NAME    "gv_title   "attachment subject
+*             I_ATTACHMENT_SIZE      = LV_LEN
+*             I_ATT_CONTENT_HEX      = LI_CONTENT_HEX ).
+*      ENDIF.
+
+      CALL METHOD go_send_request->set_document( go_document ).
+
+
+*** Send mail using Email_ID
+      sender1 = cl_cam_address_bcs=>create_internet_address( 'sawantsitesh21.ss@gmail.com' ).
+*      sender1 = cl_cam_address_bcs=>create_internet_address( p_fromid ).
+      CALL METHOD go_send_request->set_sender
+        EXPORTING
+          i_sender = sender1.
+
+*      LOOP AT s_toid.
+
+*        lo_recipient = cl_cam_address_bcs=>create_internet_address(
+*                                           s_toid-low ).
+      lo_recipient = cl_cam_address_bcs=>create_internet_address('sawantsitesh21.ss@gmail.com').
+
+*     add recipient with its respective attributes to send request
+      CALL METHOD go_send_request->add_recipient
+        EXPORTING
+          i_recipient = lo_recipient
+          i_express   = 'X'.
+
+*      ENDLOOP.
+
+      "cc
+*      LOOP AT s_ccid.
+
+*        lo_recipient = cl_cam_address_bcs=>create_internet_address(
+*                                       s_ccid-low ).
+      lo_recipient = cl_cam_address_bcs=>create_internet_address('ynadaf.tech@gmail.com').
+
+*     add recipient with its respective attributes to send request
+      CALL METHOD go_send_request->add_recipient
+        EXPORTING
+          i_recipient = lo_recipient
+          i_copy      = 'X'.
+
+*      ENDLOOP.
+
+      "cc
+*      LOOP AT s_bccid.
+*
+*        lo_recipient = cl_cam_address_bcs=>create_internet_address(
+*                                       s_bccid-low ).
+*
+**     add recipient with its respective attributes to send request
+*        CALL METHOD go_send_request->add_recipient
+*          EXPORTING
+*            i_recipient  = lo_recipient
+*            i_blind_copy = 'X'.
+*
+*      ENDLOOP.
+
+
+* set outbox flag
+*  try.
+*      if outbox = 'X'.
+      CALL METHOD go_send_request->send_request->set_link_to_outbox( 'X' ).
+*      endif.
+*    catch cx_bcs.
+*  endtry.
+
+
+*     ---------- send document ---------------------------------------
+*    TRY.
+      CALL METHOD go_send_request->set_send_immediately
+        EXPORTING
+          i_send_immediately = 'X'.
+*     CATCH cx_send_req_bcs .
+*    ENDTRY.
+
+      CALL METHOD go_send_request->send(
+        EXPORTING
+          i_with_error_screen = 'X'
+        RECEIVING
+          result              = lv_sent_to_all ).
+
+      IF lv_sent_to_all = 'X'.
+        MESSAGE s000(8i) WITH 'Email send successfully'.
+      ELSEIF lv_sent_to_all IS INITIAL.
+        MESSAGE s000(8i) WITH 'Email not send'.
+      ENDIF.
+
+      COMMIT WORK.
+
+    CATCH cx_bcs INTO lo_bcs_exception.
+
+  ENDTRY.
+ENDFORM.
+
+FORM line_break.
+  wa_contents-line = '<br>'.
+  APPEND wa_contents TO it_contents.
+  CLEAR : wa_contents.
+ENDFORM.
